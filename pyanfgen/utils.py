@@ -29,14 +29,15 @@ class ANFgenConfig:
     # Signal duration [s]
     T: float = 1.0
     # Random seed
-    seed: int = 0
+    seed: int = None
 
     def __post_init__(self):
-        np.random.seed(self.seed)
+        if self.seed is not None:
+            np.random.seed(self.seed)
         self.L = int(self.T * self.fs)
 
 
-def pyanfgen(cfg: ANFgenConfig):
+def pyanfgen(cfg: ANFgenConfig, plot=False):
 
     # Generate base signals
     baseSigs = gen_base_sigs(cfg)
@@ -48,7 +49,10 @@ def pyanfgen(cfg: ANFgenConfig):
     x = mix_signals(baseSigs, dc, 'cholesky')
 
     # Compare desired and generated coherence
-    compare(x, cfg)
+    if plot:
+        compare(x, cfg)
+
+    return x
 
 
 def gen_base_sigs(cfg: ANFgenConfig):
@@ -97,6 +101,7 @@ def mix_signals(n: np.ndarray, dc: np.ndarray, method='cholesky'):
     """Mix signals with desired spatial coherence."""
     nSensors = n.shape[1] # Number of sensors
     nFreqBins = (dc.shape[2] - 1) * 2 # Number of frequency bins
+    originalLength = n.shape[0] # Original length of input signal
     # Compute short-time Fourier transform (STFT) of all input signals
     n = np.concatenate((np.zeros((nFreqBins // 2, nSensors)), n, np.zeros((nFreqBins // 2, nSensors))), axis=0)
 
@@ -110,14 +115,18 @@ def mix_signals(n: np.ndarray, dc: np.ndarray, method='cholesky'):
         nperseg=nFreqBins,
         noverlap=0.75 * nFreqBins,
         axis=0,
-        boundary=None
+        boundary=None,
+        padded=False,
+        return_onesided=False
     )
-    nSTFT *= np.sum(win)  # Scale to match MATLAB's implementation
+    # nSTFT *= np.sum(win)  # Scale to match MATLAB's implementation
     # Rearrange dimensions of STFT matrix
     nSTFT = np.moveaxis(nSTFT, 1, -1)
     # Generate output signal in the STFT domain for each frequency bin k
     mixedSTFT = np.zeros_like(nSTFT) # STFT output matrix
-    for k in range(1, nFreqBins // 2 + 1):
+    mixedSTFT = np.zeros((nFreqBins // 2 + 1, nSTFT.shape[1], nSTFT.shape[2]))
+    # for k in range(1, nFreqBins // 2 + 1):
+    for k in range(mixedSTFT.shape[0]):
         if method == 'cholesky':
             Cmat = np.linalg.cholesky(dc[:, :, k])
             # Make upper triangular
@@ -128,21 +137,23 @@ def mix_signals(n: np.ndarray, dc: np.ndarray, method='cholesky'):
         else:
             raise ValueError('Unknown method specified.')
         mixedSTFT[k, :, :] = np.matmul(nSTFT[k, :, :], np.conj(Cmat))
-    mixedSTFT[(nFreqBins // 2 + 1):, :, :] = np.conj(
-        mixedSTFT[(nFreqBins // 2 + 1):, :, :][::-1, :, :]
-    )
+    # mixedSTFT[(nFreqBins // 2 + 1):, :, :] = np.conj(
+    #     mixedSTFT[(nFreqBins // 2 + 1):, :, :][::-1, :, :]
+    # )
     # Compute inverse STFT
     _, x = sig.istft(
         mixedSTFT,
         window=win,
         nperseg=nFreqBins,
         noverlap=0.75 * nFreqBins,
-        nfft=nFreqBins,
+        input_onesided=True,
         boundary=None,
         time_axis=1,
-        freq_axis=0
+        freq_axis=0,
     )
-    x = x[nFreqBins // 2:(-nFreqBins // 2), :]
+    x = x[nFreqBins // 2:, :]
+    x = x[:originalLength, :]
+    # x = x[nFreqBins // 2:(-nFreqBins // 2), :]
     return x
 
 
@@ -158,8 +169,9 @@ def compare(x, cfg: ANFgenConfig):
         window=np.hanning(cfg.N),
         nperseg=cfg.N,
         noverlap=0.75 * cfg.N,
-        nfft=cfg.N,
         padded=False,
+        boundary=None,
+        return_onesided=False,
         axis=0
     )
     # Rearrange dimensions of STFT matrix
