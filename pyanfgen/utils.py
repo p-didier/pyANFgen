@@ -123,10 +123,13 @@ def mix_signals(n: np.ndarray, dc: np.ndarray, method='cholesky'):
     # Rearrange dimensions of STFT matrix
     nSTFT = np.moveaxis(nSTFT, 1, -1)
     # Generate output signal in the STFT domain for each frequency bin k
-    mixedSTFT = np.zeros_like(nSTFT) # STFT output matrix
-    mixedSTFT = np.zeros((nFreqBins // 2 + 1, nSTFT.shape[1], nSTFT.shape[2]))
+    # mixedSTFT = np.zeros_like(nSTFT) # STFT output matrix
+    mixedSTFT = np.zeros(
+        (nFreqBins // 2 + 1, nSTFT.shape[1], nSTFT.shape[2]),
+        dtype=complex
+    )
     # for k in range(1, nFreqBins // 2 + 1):
-    for k in range(mixedSTFT.shape[0]):
+    for k in range(1, mixedSTFT.shape[0]):
         if method == 'cholesky':
             Cmat = np.linalg.cholesky(dc[:, :, k])
             # Make upper triangular
