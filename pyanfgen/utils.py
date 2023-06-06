@@ -16,8 +16,8 @@ class ANFgenConfig:
     N: int = 1024
     # Number of sensors
     M: int = 4
-    # Inter-sensor distance [m]
-    d: float = 0.1
+    # Inter-sensor distance matrix [m]
+    d: np.ndarray = np.array([0.])
     # Type of noise field ('spherical' or 'cylindrical')
     nfType: str = 'spherical'
     # Signal type ('noise' or 'babble')
@@ -32,6 +32,10 @@ class ANFgenConfig:
     seed: int = None
 
     def __post_init__(self):
+        if not np.allclose(self.d, self.d.T):
+            raise ValueError('The distance matrix is not symmetric.')
+        if self.d.shape[0] != self.M or self.d.shape[1] != self.M:
+            raise ValueError(f'The provided distance matrix dimensions ({self.d.shape[0]}x{self.d.shape[1]}) do not match the number of mics ({self.M}).')
         if self.seed is not None:
             np.random.seed(self.seed)
         self.L = int(self.T * self.fs)
@@ -89,7 +93,7 @@ def gen_coherence_matrix(cfg: ANFgenConfig):
                 dc[p, q, :] = np.ones((1, cfg.N // 2 + 1))
             else:
                 if cfg.nfType == 'spherical':
-                    dc[p, q, :] = np.sinc(ww * np.abs(p - q) * cfg.d / (cfg.c * np.pi))
+                    dc[p, q, :] = np.sinc(ww * np.abs(p - q) * cfg.d[p, q] / (cfg.c * np.pi))
                 elif cfg.nfType == 'cylindrical':
                     raise NotImplementedError('Cylindrical noise field not implemented yet -- missing `bessel` function (see original MATLAB implementation of ANF-Generator).')
                 else:
@@ -162,9 +166,10 @@ def mix_signals(n: np.ndarray, dc: np.ndarray, method='cholesky'):
 
 def compare(x, cfg: ANFgenConfig):
     """Compare desired and generated coherence."""
+    # raise ValueError('Issue: matrix-like distances `d` not yet supported [PD:2023.06.06]')  # FIXME: account for this
     ww = 2 * np.pi * cfg.fs * np.arange(cfg.N // 2 + 1) / cfg.N
-    sc_theory = np.zeros((cfg.M - 1, cfg.N // 2 + 1))
-    sc_generated = np.zeros((cfg.M - 1, cfg.N // 2 + 1))
+    # sc_theory = np.zeros((cfg.M - 1, cfg.N // 2 + 1))
+    # sc_generated = np.zeros((cfg.M - 1, cfg.N // 2 + 1))
 
     # Calculate STFT and PSD of all output signals
     _, _, xSTFT = sig.stft(
@@ -183,44 +188,75 @@ def compare(x, cfg: ANFgenConfig):
     phi_x = np.mean(np.abs(xSTFT) ** 2, axis=1)
 
     # Calculate spatial coherence of desired and generated signals
-    for m in range(cfg.M - 1):
-        if cfg.nfType == 'spherical':
-            sc_theory[m, :] = np.sinc(ww * (m + 1) * cfg.d / (cfg.c * np.pi))
-        elif cfg.nfType == 'cylindrical':
-            raise NotImplementedError('Cylindrical noise field not implemented yet -- missing `bessel` function (see original MATLAB implementation of ANF-Generator).')
-        else:
-            raise ValueError('Unknown noise field.')
-        # Compute cross-PSD of x_1 and x_(m+1)
-        psi_x = np.mean(xSTFT[:, :, 0] * np.conj(xSTFT[:, :, m + 1]), axis=1)
-        # Compute real-part of complex coherence between x_1 and x_(m+1)
-        sc_generated[m, :] = np.real(
-            psi_x / np.sqrt(phi_x[:, 0] * phi_x[:, m + 1])
-        ).T
+    # for m in range(cfg.M - 1):
+    #     if cfg.nfType == 'spherical':
+    #         sc_theory[m, :] = np.sinc(ww * (m + 1) * cfg.d / (cfg.c * np.pi))
+    #     elif cfg.nfType == 'cylindrical':
+    #         raise NotImplementedError('Cylindrical noise field not implemented yet -- missing `bessel` function (see original MATLAB implementation of ANF-Generator).')
+    #     else:
+    #         raise ValueError('Unknown noise field.')
+    #     # Compute cross-PSD of x_1 and x_(m+1)
+    #     psi_x = np.mean(xSTFT[:, :, 0] * np.conj(xSTFT[:, :, m + 1]), axis=1)
+    #     # Compute real-part of complex coherence between x_1 and x_(m+1)
+    #     sc_generated[m, :] = np.real(
+    #         psi_x / np.sqrt(phi_x[:, 0] * phi_x[:, m + 1])
+    #     ).T
+    
+    sc_theory = np.zeros((cfg.M, cfg.M, cfg.N // 2 + 1))
+    sc_generated = np.zeros((cfg.M, cfg.M, cfg.N // 2 + 1))
+    for p in range(cfg.M):
+        for q in range(cfg.M):
+            if p == q:
+                sc_theory[p, q, :] = np.ones((1, cfg.N // 2 + 1))
+                sc_generated[p, q, :] = np.ones((1, cfg.N // 2 + 1))
+            else:
+                if cfg.nfType == 'spherical':
+                    sc_theory[p, q, :] = np.sinc(ww * np.abs(p - q) * cfg.d[p, q] / (cfg.c * np.pi))
+                elif cfg.nfType == 'cylindrical':
+                    raise NotImplementedError('Cylindrical noise field not implemented yet -- missing `bessel` function (see original MATLAB implementation of ANF-Generator).')
+                else:
+                    raise ValueError('Unknown noise field.')
+                # Compute cross-PSD of x_p and x_q
+                psi_x = np.mean(xSTFT[:, :, p] * np.conj(xSTFT[:, :, q]), axis=1)
+                # Compute real-part of complex coherence between x_1 and x_(m+1)
+                sc_generated[p, q, :] = np.real(
+                    psi_x / np.sqrt(phi_x[:, p] * phi_x[:, q])
+                ).T
 
     # Calculate normalized mean square error
-    nmse = np.zeros((cfg.M, 1))
-    for m in range(cfg.M - 1):
-        nmse[m] = 10 * np.log10(
-            np.sum(((sc_theory[m, :]) - (sc_generated[m, :])) ** 2) /\
-                np.sum((sc_theory[m, :]) ** 2)
-        )
+    # nmse = np.zeros((cfg.M, 1))
+    # for m in range(cfg.M - 1):
+    #     nmse[m] = 10 * np.log10(
+    #         np.sum(((sc_theory[m, :]) - (sc_generated[m, :])) ** 2) /\
+    #             np.sum((sc_theory[m, :]) ** 2)
+    #     )
 
-    # Plot spatial coherence of two sensor pairs
-    mm = min(2, cfg.M - 1)
+    nmse = np.zeros((cfg.M, cfg.M))
+    for p in range(cfg.M):
+        for q in range(cfg.M):
+            if p == q:
+                nmse[p, q] = 1
+            else:
+                nmse[p, q] = 10 * np.log10(
+                    np.sum(((sc_theory[p, q, :]) - (sc_generated[p, q, :])) ** 2) /\
+                        np.sum((sc_theory[p, q, :]) ** 2)
+                )
+
+    # Plot spatial coherence of every two sensor pairs
     f = np.arange(0, stop=cfg.fs / 2 + 1, step=(cfg.fs / 2) / (cfg.N / 2))
-    fig, axes = plt.subplots(mm, 1)
+    fig, axes = plt.subplots(cfg.M, cfg.M)
     fig.set_size_inches(6.5, 5.5)
-    for m in range(mm):
-        if mm == 1:
-            currAx = axes
-        else:
-            currAx = axes[m]
-        currAx.plot(f / 1000, sc_theory[m, :], '-k', linewidth=1.5)
-        currAx.plot(f / 1000, sc_generated[m, :], '-.b', linewidth=1.5)
-        currAx.set_xlabel('Frequency [kHz]')
-        currAx.set_ylabel('Real(Spatial Coherence)')
-        currAx.set_title(f'Inter sensor distance {(m + 1) * cfg.d} m')
-        currAx.legend('Theory', f'Proposed Method (NMSE = {nmse[m]} dB)')
-        currAx.grid(True)
+    for p in range(cfg.M):
+        for q in range(cfg.M):
+            if p != q:
+                currAx = axes[p, q]
+                currAx.plot(f / 1000, sc_theory[p, q, :], '-k', linewidth=1.5)
+                currAx.plot(f / 1000, sc_generated[p, q, :], '-.b', linewidth=1.5)
+                currAx.set_xlabel('Frequency [kHz]')
+                currAx.set_ylabel('Real(Spatial Coherence)')
+                currAx.set_title(f'Inter sensor distance {cfg.d[p, q]} m')
+                if p == q and p == cfg.M - 1:
+                    currAx.legend(['Theory', f'Proposed Method (NMSE = {np.round(nmse[p, q], 2)} dB)'])
+                currAx.grid(True)
     fig.tight_layout()
     plt.show()
