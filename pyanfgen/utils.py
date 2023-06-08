@@ -32,6 +32,9 @@ class ANFgenConfig:
     seed: int = None
 
     def __post_init__(self):
+        if isinstance(self.d, float) or isinstance(self.d, int):
+            self.d = np.full(shape=(self.M, self.M), fill_value=self.d)
+            np.fill_diagonal(self.d, 0.)
         if not np.allclose(self.d, self.d.T):
             raise ValueError('The distance matrix is not symmetric.')
         if self.d.shape[0] != self.M or self.d.shape[1] != self.M:
@@ -93,7 +96,10 @@ def gen_coherence_matrix(cfg: ANFgenConfig):
                 dc[p, q, :] = np.ones((1, cfg.N // 2 + 1))
             else:
                 if cfg.nfType == 'spherical':
-                    dc[p, q, :] = np.sinc(ww * np.abs(p - q) * cfg.d[p, q] / (cfg.c * np.pi))
+                    dc[p, q, :] = np.sinc(
+                        # ww * np.abs(p - q) * cfg.d[p, q] / (cfg.c * np.pi)
+                        ww * cfg.d[p, q] / (cfg.c * np.pi)
+                    )
                 elif cfg.nfType == 'cylindrical':
                     raise NotImplementedError('Cylindrical noise field not implemented yet -- missing `bessel` function (see original MATLAB implementation of ANF-Generator).')
                 else:
@@ -107,10 +113,17 @@ def mix_signals(n: np.ndarray, dc: np.ndarray, method='cholesky'):
     nFreqBins = (dc.shape[2] - 1) * 2 # Number of frequency bins
     originalLength = n.shape[0] # Original length of input signal
     # Compute short-time Fourier transform (STFT) of all input signals
-    n = np.concatenate((np.zeros((nFreqBins // 2, nSensors)), n, np.zeros((nFreqBins // 2, nSensors))), axis=0)
+    n = np.concatenate((
+        np.zeros((nFreqBins // 2, nSensors)),
+        n,
+        np.zeros((nFreqBins // 2, nSensors))
+    ), axis=0)
 
-    # MATLAB's `hanning` window -- https://stackoverflow.com/a/56485857 (accessed 2023-06-01)
-    win = .5 * (1 - np.cos(2 * np.pi * np.arange(1, int(nFreqBins / 2 + 1)).T / (nFreqBins + 1)))
+    # MATLAB's `hanning` window
+    # -- https://stackoverflow.com/a/56485857 (accessed 2023-06-01)
+    win = .5 * (1 - np.cos(
+        2 * np.pi * np.arange(1, int(nFreqBins / 2 + 1)).T / (nFreqBins + 1)
+    ))
     win = np.concatenate((win, win[::-1]))
 
     _, _, nSTFT = sig.stft(
@@ -123,19 +136,16 @@ def mix_signals(n: np.ndarray, dc: np.ndarray, method='cholesky'):
         padded=False,
         return_onesided=False
     )
-    # nSTFT *= np.sum(win)  # Scale to match MATLAB's implementation
     # Rearrange dimensions of STFT matrix
     nSTFT = np.moveaxis(nSTFT, 1, -1)
     # Generate output signal in the STFT domain for each frequency bin k
-    # mixedSTFT = np.zeros_like(nSTFT) # STFT output matrix
     mixedSTFT = np.zeros(
         (nFreqBins // 2 + 1, nSTFT.shape[1], nSTFT.shape[2]),
         dtype=complex
     )
-    # for k in range(1, nFreqBins // 2 + 1):
     for k in range(1, mixedSTFT.shape[0]):
         if method == 'cholesky':
-            Cmat = np.linalg.cholesky(dc[:, :, k])
+            Cmat = np.linalg.cholesky(dc[:, :, k])  # requires positive definite matrix `dc[:, :, k]`
             # Make upper triangular
             Cmat = Cmat.T
         elif method == 'eigen':
@@ -144,9 +154,6 @@ def mix_signals(n: np.ndarray, dc: np.ndarray, method='cholesky'):
         else:
             raise ValueError('Unknown method specified.')
         mixedSTFT[k, :, :] = np.matmul(nSTFT[k, :, :], np.conj(Cmat))
-    # mixedSTFT[(nFreqBins // 2 + 1):, :, :] = np.conj(
-    #     mixedSTFT[(nFreqBins // 2 + 1):, :, :][::-1, :, :]
-    # )
     # Compute inverse STFT
     _, x = sig.istft(
         mixedSTFT,
@@ -160,16 +167,12 @@ def mix_signals(n: np.ndarray, dc: np.ndarray, method='cholesky'):
     )
     x = x[nFreqBins // 2:, :]
     x = x[:originalLength, :]
-    # x = x[nFreqBins // 2:(-nFreqBins // 2), :]
     return x
 
 
 def compare(x, cfg: ANFgenConfig):
     """Compare desired and generated coherence."""
-    # raise ValueError('Issue: matrix-like distances `d` not yet supported [PD:2023.06.06]')  # FIXME: account for this
     ww = 2 * np.pi * cfg.fs * np.arange(cfg.N // 2 + 1) / cfg.N
-    # sc_theory = np.zeros((cfg.M - 1, cfg.N // 2 + 1))
-    # sc_generated = np.zeros((cfg.M - 1, cfg.N // 2 + 1))
 
     # Calculate STFT and PSD of all output signals
     _, _, xSTFT = sig.stft(
@@ -186,21 +189,6 @@ def compare(x, cfg: ANFgenConfig):
     xSTFT = np.moveaxis(xSTFT, 1, -1)
     xSTFT = xSTFT[:cfg.N // 2 + 1, :, :]
     phi_x = np.mean(np.abs(xSTFT) ** 2, axis=1)
-
-    # Calculate spatial coherence of desired and generated signals
-    # for m in range(cfg.M - 1):
-    #     if cfg.nfType == 'spherical':
-    #         sc_theory[m, :] = np.sinc(ww * (m + 1) * cfg.d / (cfg.c * np.pi))
-    #     elif cfg.nfType == 'cylindrical':
-    #         raise NotImplementedError('Cylindrical noise field not implemented yet -- missing `bessel` function (see original MATLAB implementation of ANF-Generator).')
-    #     else:
-    #         raise ValueError('Unknown noise field.')
-    #     # Compute cross-PSD of x_1 and x_(m+1)
-    #     psi_x = np.mean(xSTFT[:, :, 0] * np.conj(xSTFT[:, :, m + 1]), axis=1)
-    #     # Compute real-part of complex coherence between x_1 and x_(m+1)
-    #     sc_generated[m, :] = np.real(
-    #         psi_x / np.sqrt(phi_x[:, 0] * phi_x[:, m + 1])
-    #     ).T
     
     sc_theory = np.zeros((cfg.M, cfg.M, cfg.N // 2 + 1))
     sc_generated = np.zeros((cfg.M, cfg.M, cfg.N // 2 + 1))
@@ -211,7 +199,8 @@ def compare(x, cfg: ANFgenConfig):
                 sc_generated[p, q, :] = np.ones((1, cfg.N // 2 + 1))
             else:
                 if cfg.nfType == 'spherical':
-                    sc_theory[p, q, :] = np.sinc(ww * np.abs(p - q) * cfg.d[p, q] / (cfg.c * np.pi))
+                    # sc_theory[p, q, :] = np.sinc(ww * np.abs(p - q) * cfg.d[p, q] / (cfg.c * np.pi))
+                    sc_theory[p, q, :] = np.sinc(ww * cfg.d[p, q] / (cfg.c * np.pi))
                 elif cfg.nfType == 'cylindrical':
                     raise NotImplementedError('Cylindrical noise field not implemented yet -- missing `bessel` function (see original MATLAB implementation of ANF-Generator).')
                 else:
@@ -222,14 +211,6 @@ def compare(x, cfg: ANFgenConfig):
                 sc_generated[p, q, :] = np.real(
                     psi_x / np.sqrt(phi_x[:, p] * phi_x[:, q])
                 ).T
-
-    # Calculate normalized mean square error
-    # nmse = np.zeros((cfg.M, 1))
-    # for m in range(cfg.M - 1):
-    #     nmse[m] = 10 * np.log10(
-    #         np.sum(((sc_theory[m, :]) - (sc_generated[m, :])) ** 2) /\
-    #             np.sum((sc_theory[m, :]) ** 2)
-    #     )
 
     nmse = np.zeros((cfg.M, cfg.M))
     for p in range(cfg.M):
@@ -244,19 +225,35 @@ def compare(x, cfg: ANFgenConfig):
 
     # Plot spatial coherence of every two sensor pairs
     f = np.arange(0, stop=cfg.fs / 2 + 1, step=(cfg.fs / 2) / (cfg.N / 2))
-    fig, axes = plt.subplots(cfg.M, cfg.M)
+    fig, axes = plt.subplots(cfg.M, cfg.M, sharex=True, sharey=True)
     fig.set_size_inches(6.5, 5.5)
     for p in range(cfg.M):
         for q in range(cfg.M):
             if p != q:
                 currAx = axes[p, q]
-                currAx.plot(f / 1000, sc_theory[p, q, :], '-k', linewidth=1.5)
-                currAx.plot(f / 1000, sc_generated[p, q, :], '-.b', linewidth=1.5)
-                currAx.set_xlabel('Frequency [kHz]')
-                currAx.set_ylabel('Real(Spatial Coherence)')
-                currAx.set_title(f'Inter sensor distance {cfg.d[p, q]} m')
+                currAx.plot(
+                    f / 1000,
+                    sc_theory[p, q, :],
+                    '-k',
+                    linewidth=1.5
+                )
+                currAx.plot(
+                    f / 1000,
+                    sc_generated[p, q, :],
+                    '-.b',
+                    linewidth=1.5
+                )
+                if p == cfg.M - 1:
+                    currAx.set_xlabel('Frequency [kHz]')
+                currAx.set_ylabel(f'$\\gamma_{{{p + 1}{q + 1}}}(\\omega)$')
+                currAx.set_title(
+                    f'$d_{{{p + 1}{q + 1}}}$ = {np.round(cfg.d[p, q], 2)} m'
+                )
                 if p == q and p == cfg.M - 1:
-                    currAx.legend(['Theory', f'Proposed Method (NMSE = {np.round(nmse[p, q], 2)} dB)'])
+                    currAx.legend([
+                        'Theory',
+                        f'Proposed Method (NMSE = {np.round(nmse[p, q], 2)} dB)'
+                    ])
                 currAx.grid(True)
     fig.tight_layout()
     plt.show()
