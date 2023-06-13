@@ -7,7 +7,7 @@ import sys
 import numpy as np
 from pyanfgen.utils import ANFgenConfig, pyanfgen
 
-M = 3  # number of sensors in network
+M = 7  # number of sensors in network
 SEED = 12345
 MAX_DISTANCE = 2    # [m] max. inter-sensor distance
 MIN_DISTANCE = 0.2  # [m] min. inter-sensor distance

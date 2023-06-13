@@ -145,7 +145,9 @@ def mix_signals(n: np.ndarray, dc: np.ndarray, method='cholesky'):
     )
     for k in range(1, mixedSTFT.shape[0]):
         if method == 'cholesky':
-            Cmat = np.linalg.cholesky(dc[:, :, k])  # requires positive definite matrix `dc[:, :, k]`
+            Cmat = np.linalg.cholesky(
+                nearestPD(dc[:, :, k])  # requires positive definite matrix `dc[:, :, k]`
+            )
             # Make upper triangular
             Cmat = Cmat.T
         elif method == 'eigen':
@@ -257,3 +259,55 @@ def compare(x, cfg: ANFgenConfig):
                 currAx.grid(True)
     fig.tight_layout()
     plt.show()
+
+
+# From https://stackoverflow.com/a/43244194 
+def nearestPD(A):
+    """Find the nearest positive-definite matrix to input
+
+    A Python/Numpy port of John D'Errico's `nearestSPD` MATLAB code [1], which
+    credits [2].
+
+    [1] https://www.mathworks.com/matlabcentral/fileexchange/42885-nearestspd
+
+    [2] N.J. Higham, "Computing a nearest symmetric positive semidefinite
+    matrix" (1988): https://doi.org/10.1016/0024-3795(88)90223-6
+    """
+    def isPD(B):
+        """Returns true when input is positive-definite, via Cholesky"""
+        try:
+            _ = np.linalg.cholesky(B)
+            return True
+        except np.linalg.LinAlgError:
+            return False
+
+    Bmat = (A + A.T) / 2
+    _, s, Vmat = np.linalg.svd(Bmat)
+
+    Hmat = np.dot(Vmat.T, np.dot(np.diag(s), Vmat))
+
+    A2mat = (Bmat + Hmat) / 2
+
+    A3mat = (A2mat + A2mat.T) / 2
+
+    if isPD(A3mat):
+        return A3mat
+
+    spacing = np.spacing(np.linalg.norm(A))
+    # The above is different from [1]. It appears that MATLAB's `chol` Cholesky
+    # decomposition will accept matrixes with exactly 0-eigenvalue, whereas
+    # Numpy's will not. So where [1] uses `eps(mineig)` (where `eps` is Matlab
+    # for `np.spacing`), we use the above definition. CAVEAT: our `spacing`
+    # will be much larger than [1]'s `eps(mineig)`, since `mineig` is usually on
+    # the order of 1e-16, and `eps(1e-16)` is on the order of 1e-34, whereas
+    # `spacing` will, for Gaussian random matrixes of small dimension, be on
+    # othe order of 1e-16. In practice, both ways converge, as the unit test
+    # below suggests.
+    Imat = np.eye(A.shape[0])
+    k = 1
+    while not isPD(A3mat):
+        mineig = np.min(np.real(np.linalg.eigvals(A3mat)))
+        A3mat += Imat * (-mineig * k**2 + spacing)
+        k += 1
+
+    return A3mat
